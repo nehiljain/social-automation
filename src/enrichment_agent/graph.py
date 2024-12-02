@@ -4,7 +4,7 @@ Works with a chat model with tool calling support.
 """
 
 import json
-from typing import Any, Dict, List, Literal, Optional, cast
+from typing import Any, Dict, List, Literal, Optional, Union, cast
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
@@ -17,6 +17,72 @@ from enrichment_agent.configuration import Configuration
 from enrichment_agent.state import InputState, OutputState, State
 from enrichment_agent.tools import scrape_website, search
 from enrichment_agent.utils import init_model
+
+
+async def generate_subtopics_agent(
+    state: State, *, config: Optional[RunnableConfig] = None
+) -> Dict[str, Any]:
+    """Generate subtopics for the given research topic.
+
+    This node runs before the main research to break down the topic into subtopics.
+    """
+    # Define the subtopics extraction schema
+    subtopics_schema = {
+        "type": "object",
+        "properties": {
+            "subtopics": {
+                "type": "array",
+                "description": "List of 10 action-oriented subtopics",
+                "items": {
+                    "type": "string",
+                    "description": "A clear, action-oriented subtopic that starts with a verb"
+                },
+                "minItems": 10,
+                "maxItems": 10
+            }
+        },
+        "required": ["subtopics"]
+    }
+
+    # Define the 'Info' tool for subtopics
+    info_tool = {
+        "name": "Info",
+        "description": "Call this when you have generated all 10 subtopics",
+        "parameters": subtopics_schema,
+    }
+
+    # Format the subtopics generation prompt with the topic
+    p = prompts.GENERATE_SUBTOPICS_PROMPT.format(topic=state.topic)
+
+    # Create the messages list with the formatted prompt
+    messages = [HumanMessage(content=p)]
+
+    # Initialize the raw model with the provided configuration and bind the tools
+    raw_model = init_model(config)
+    model = raw_model.bind_tools([scrape_website, search, info_tool], tool_choice="any")
+    response = cast(AIMessage, await model.ainvoke(messages))
+
+    # Initialize info to None
+    info = None
+
+    # Check if the response has tool calls
+    if response.tool_calls:
+        for tool_call in response.tool_calls:
+            if tool_call["name"] == "Info":
+                info = tool_call["args"]
+                break
+
+    response_messages: List[BaseMessage] = [response]
+    if not response.tool_calls:  # If LLM didn't respect the tool_choice
+        response_messages.append(
+            HumanMessage(content="Please respond by calling one of the provided tools.")
+        )
+
+    return {
+        "messages": response_messages,
+        "subtopics": info["subtopics"] if info else None,
+        "loop_step": 0,  # Reset loop step as this is the start
+    }
 
 
 async def call_agent_model(
@@ -98,6 +164,21 @@ class InfoIsSatisfactory(BaseModel):
     )
 
 
+class SubtopicsQuality(BaseModel):
+    """Validate whether the generated subtopics are satisfactory."""
+
+    analysis: List[str] = Field(
+        description="Provide analysis of the subtopics based on the evaluation criteria (at least 3 points)"
+    )
+    is_satisfactory: bool = Field(
+        description="After providing your analysis, indicate whether the subtopics are satisfactory"
+    )
+    improvement_suggestions: Optional[str] = Field(
+        description="If the subtopics are not satisfactory, provide specific suggestions for improvement",
+        default=None,
+    )
+
+
 async def reflect(
     state: State, *, config: Optional[RunnableConfig] = None
 ) -> Dict[str, Any]:
@@ -160,6 +241,72 @@ If you don't think it is good, you should be very specific about what could be i
         }
 
 
+async def reflect_subtopics(
+    state: State, *, config: Optional[RunnableConfig] = None
+) -> Dict[str, Any]:
+    """Validate the quality of the generated subtopics.
+
+    This function evaluates whether the subtopics are well-formed,
+    comprehensive, and appropriate for the main topic.
+    """
+    if not state.subtopics:
+        return {
+            "messages": [
+                ToolMessage(
+                    tool_call_id="reflect_subtopics",
+                    content="No subtopics generated to reflect on",
+                    name="Info",
+                    status="error",
+                )
+            ]
+        }
+
+    # Format the reflection prompt with the topic and subtopics
+    p = prompts.REFLECT_SUBTOPICS_PROMPT.format(
+        topic=state.topic,
+        subtopics="\n".join(f"- {st}" for st in state.subtopics)
+    )
+
+    messages = [HumanMessage(content=p)]
+
+    # Initialize the model with structured output
+    raw_model = init_model(config)
+    bound_model = raw_model.with_structured_output(SubtopicsQuality)
+    response = cast(SubtopicsQuality, await bound_model.ainvoke(messages))
+
+    last_message = state.messages[-1]
+    if not isinstance(last_message, AIMessage):
+        raise ValueError(
+            f"{reflect_subtopics.__name__} expects the last message to be an AI message."
+            f" Got: {type(last_message)}"
+        )
+
+    if response.is_satisfactory:
+        return {
+            "messages": [
+                ToolMessage(
+                    tool_call_id=last_message.tool_calls[0]["id"],
+                    content="\n".join(response.analysis),
+                    name="Info",
+                    additional_kwargs={"artifact": response.model_dump()},
+                    status="success",
+                )
+            ],
+        }
+    else:
+        return {
+            "messages": [
+                ToolMessage(
+                    tool_call_id=last_message.tool_calls[0]["id"],
+                    content=f"Subtopics need improvement:\n{response.improvement_suggestions}",
+                    name="Info",
+                    additional_kwargs={"artifact": response.model_dump()},
+                    status="error",
+                )
+            ]
+        }
+
+
 def route_after_agent(
     state: State,
 ) -> Literal["reflect", "tools", "call_agent_model", "__end__"]:
@@ -213,17 +360,74 @@ def route_after_checker(
         return "__end__"
 
 
+def route_after_subtopics(
+    state: State,
+) -> Literal["call_agent_model", "tools"]:
+    """Route to next node after subtopics generation."""
+    last_message = state.messages[-1]
+
+    if not isinstance(last_message, AIMessage):
+        return "generate_subtopics"
+
+    # If the "Into" tool was called, then the model provided its extraction output. Reflect on the result
+    if last_message.tool_calls and last_message.tool_calls[0]["name"] == "Info":
+        return "reflect_subtopics"
+
+    # If we have subtopics, move to main research
+    if state.subtopics:
+        return "reflect_subtopics"
+    # Otherwise, let the tools handle the response
+    return "tools"
+
+
+def route_after_subtopics_reflection(
+    state: State,
+) -> Literal["generate_subtopics", "call_agent_model"]:
+    """Route to next node after subtopics reflection."""
+    last_message = state.messages[-1]
+
+    if not isinstance(last_message, ToolMessage):
+        return "generate_subtopics"
+
+    # If subtopics were satisfactory, move to main research
+    if last_message.status == "success":
+        return "call_agent_model"
+    # Otherwise, regenerate subtopics
+    return "generate_subtopics"
+
+
 # Create the graph
 workflow = StateGraph(
     State, input=InputState, output=OutputState, config_schema=Configuration
 )
-workflow.add_node(call_agent_model)
-workflow.add_node(reflect)
+workflow.add_node("generate_subtopics", generate_subtopics_agent)
+workflow.add_node("reflect_subtopics", reflect_subtopics)
+# workflow.add_node("call_agent_model", call_agent_model)
+# workflow.add_node("reflect", reflect)
 workflow.add_node("tools", ToolNode([search, scrape_website]))
-workflow.add_edge("__start__", "call_agent_model")
-workflow.add_conditional_edges("call_agent_model", route_after_agent)
-workflow.add_edge("tools", "call_agent_model")
-workflow.add_conditional_edges("reflect", route_after_checker)
+workflow.add_edge("__start__", "generate_subtopics")
+# workflow.add_edge("tools", "generate_subtopics")
+workflow.add_conditional_edges(
+    "generate_subtopics",
+    route_after_subtopics,
+    {
+        "reflect_subtopics": "reflect_subtopics",
+        "tools": "tools",
+        "generate_subtopics": "generate_subtopics"
+    }
+)
+workflow.add_conditional_edges(
+    "reflect_subtopics",
+    route_after_subtopics_reflection,
+    {
+        "generate_subtopics": "generate_subtopics",
+        "__end__": "__end__"
+        # "call_agent_model": "call_agent_model"
+    }
+)
+# workflow.add_conditional_edges("call_agent_model", route_after_agent)
+
+# workflow.add_conditional_edges("reflect", route_after_checker)
 
 graph = workflow.compile()
-graph.name = "ResearchTopic"
+graph.name = "WritingTopicsResearch"

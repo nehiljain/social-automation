@@ -6,7 +6,7 @@ data model used internally by the graph.
 
 import operator
 from dataclasses import dataclass, field
-from typing import Annotated, Any, List, Optional
+from typing import Annotated, Any, List, Optional, Dict, TypedDict
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph import add_messages
@@ -70,6 +70,8 @@ class State(InputState):
 
     # Feel free to add additional attributes to your state as needed.
     # Common examples include retrieved documents, extracted entities, API connections, etc.
+
+    subtopics: Optional[List[str]] = field(default=None)
 
 
 @dataclass(kw_only=True)

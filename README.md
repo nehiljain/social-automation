@@ -81,7 +81,7 @@ End setup instructions
 As an example, here is a research topic we can consider.
 
 ```
-"Top 5 chip providers for LLM Training"
+"Content about the latest trends in data engineering with LLMs and sql to text"
 ```
 
 And here is a desired extraction schema (pasted in as "`extraction_schema`"):
@@ -90,38 +90,61 @@ And here is a desired extraction schema (pasted in as "`extraction_schema`"):
 {
     "type": "object",
     "properties": {
-        "companies": {
+        "content_ideas": {
             "type": "array",
             "items": {
                 "type": "object",
                 "properties": {
-                    "name": {
+                    "category": {
                         "type": "string",
-                        "description": "Company name"
+                        "description": "Content category (e.g., educational, entertainment, how-to, lifestyle)"
                     },
-                    "technologies": {
+                    "topic": {
                         "type": "string",
-                        "description": "Brief summary of key technologies used by the company"
+                        "description": "Specific subject or title of the content"
                     },
-                    "market_share": {
+                    "description": {
                         "type": "string",
-                        "description": "Overview of market share for this company"
+                        "description": "Detailed outline or description of what the content should cover"
                     },
-                    "future_outlook": {
-                        "type": "string",
-                        "description": "Brief summary of future prospects and developments in the field for this company"
-                    },
-                    "key_powers": {
-                        "type": "string",
-                        "description": "Which of the 7 Powers (Scale Economies, Network Economies, Counter Positioning, Switching Costs, Branding, Cornered Resource, Process Power) best describe this company's competitive advantage"
+                    "topic_analysis": {
+                        "type": "object",
+                        "properties": {
+                            "complexity_level": {
+                                "type": "string",
+                                "description": "Whether it's a beginner, intermediate, or advanced topic",
+                                "enum": ["beginner", "intermediate", "advanced"]
+                            },
+                            "evergreen_status": {
+                                "type": "boolean",
+                                "description": "Whether this is a forever-relevant topic or time-sensitive"
+                            },
+                            "trending_status": {
+                                "type": "string",
+                                "description": "Current trend status (e.g., trending up, stable, declining)"
+                            },
+                            "audience_engagement_potential": {
+                                "type": "string",
+                                "description": "Expected level of audience interaction and engagement",
+                                "enum": ["low", "medium", "high"]
+                            },
+                            "content_formats": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string"
+                                },
+                                "description": "Best formats for this content (e.g., video, blog, short-form, long-form)"
+                            }
+                        },
+                        "required": ["complexity_level", "evergreen_status", "trending_status", "audience_engagement_potential", "content_formats"]
                     }
                 },
-                "required": ["name", "technologies", "market_share", "future_outlook"]
+                "required": ["category", "topic", "description", "topic_analysis"]
             },
-            "description": "List of companies"
+            "description": "List of content ideas with detailed analysis"
         }
     },
-    "required": ["companies"]
+    "required": ["content_ideas"]
 }
 ```
 
